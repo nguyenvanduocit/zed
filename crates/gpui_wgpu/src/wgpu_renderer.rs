@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
 use gpui::{
     AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, Path, Point, PrimitiveBatch,
-    ScaledPixels, Scene, Size, get_gamma_correction_ratios,
+    ScaledPixels, Scene, Size, SpriteBlend, get_gamma_correction_ratios,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
@@ -132,6 +132,7 @@ struct WgpuPipelines {
     mono_sprites: wgpu::RenderPipeline,
     subpixel_sprites: Option<wgpu::RenderPipeline>,
     poly_sprites: wgpu::RenderPipeline,
+    additive_poly_sprites: wgpu::RenderPipeline,
     #[allow(dead_code)]
     surfaces: wgpu::RenderPipeline,
 }
@@ -941,6 +942,37 @@ impl WgpuRendererCore {
             &shader_module,
         );
 
+        // Adds the sprite's color to the destination and leaves destination alpha untouched,
+        // so a glow layer brightens what is beneath it without changing its coverage.
+        let additive_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+        let additive_poly_sprites = create_pipeline(
+            "additive_poly_sprites",
+            "vs_poly_sprite",
+            "fs_poly_sprite_additive",
+            &layouts.globals,
+            &layouts.instances,
+            Some(&layouts.texture),
+            wgpu::PrimitiveTopology::TriangleStrip,
+            &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(additive_blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            1,
+            &shader_module,
+        );
+
         let surfaces = create_pipeline(
             "surfaces",
             "vs_surface",
@@ -963,6 +995,7 @@ impl WgpuRendererCore {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            additive_poly_sprites,
             surfaces,
         }
     }
@@ -1624,11 +1657,20 @@ impl WgpuRendererCore {
                             &mut pass,
                         )?;
                     }
-                    PrimitiveBatch::PolychromeSprites { texture_id, range } => {
+                    PrimitiveBatch::PolychromeSprites {
+                        texture_id,
+                        blend,
+                        range,
+                    } => {
+                        let pipelines = &self.resources().pipelines;
+                        let pipeline = match blend {
+                            SpriteBlend::Normal => &pipelines.poly_sprites,
+                            SpriteBlend::Additive => &pipelines.additive_poly_sprites,
+                        };
                         self.draw_sprites(
                             &instance_bindings.polychrome_sprites,
                             texture_id,
-                            &self.resources().pipelines.poly_sprites,
+                            pipeline,
                             instance_range(range),
                             &mut pass,
                         )?;

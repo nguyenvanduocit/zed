@@ -917,14 +917,15 @@ impl MetalRenderer {
                         viewport_size,
                         &command_encoder,
                     ),
-                PrimitiveBatch::PolychromeSprites { texture_id, range } => self
-                    .draw_polychrome_sprites(
-                        texture_id,
-                        range,
-                        instance_bindings,
-                        viewport_size,
-                        &command_encoder,
-                    ),
+                PrimitiveBatch::PolychromeSprites {
+                    texture_id, range, ..
+                } => self.draw_polychrome_sprites(
+                    texture_id,
+                    range,
+                    instance_bindings,
+                    viewport_size,
+                    &command_encoder,
+                ),
                 PrimitiveBatch::Surfaces(range) => {
                     if let Err(error) = self.draw_surfaces(
                         &scene.surfaces[range.clone()],

@@ -1261,7 +1261,7 @@ fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
 
 struct PolychromeSprite {
     order: u32,
-    pad: u32,
+    blend: u32,
     tile: AtlasTile,
     grayscale: u32,
     opacity: f32,
@@ -1308,6 +1308,27 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
         color = vec4<f32>(vec3<f32>(grayscale), sample.a);
     }
     return blend_color(color, sprite.opacity * saturate(0.5 - distance));
+}
+
+// Paired with a One/One color blend: rgb is not weighted by the sample's alpha, and alpha is
+// zero so the destination's alpha is left as is.
+@fragment
+fn fs_poly_sprite_additive(input: PolySpriteVarying) -> @location(0) vec4<f32> {
+    let sample = textureSample(t_sprite, s_sprite, input.tile_position);
+    // Alpha clip after using the derivatives.
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+
+    let sprite = load_poly_sprite(input.sprite_id);
+    let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+    let opacity_factor = sprite.opacity * saturate(0.5 - distance);
+
+    var color = sample.rgb;
+    if (sprite.grayscale != 0u) {
+        color = vec3<f32>(dot(color, GRAYSCALE_FACTORS));
+    }
+    return vec4<f32>(color * opacity_factor, 0.0);
 }
 
 // --- surfaces --- //
