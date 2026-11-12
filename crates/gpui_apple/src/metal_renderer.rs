@@ -3,7 +3,7 @@ use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use gpui::{
     AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
-    PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+    PrimitiveBatch, ScaledPixels, Scene, Size, SpriteBlend, point, size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
@@ -142,6 +142,8 @@ pub struct MetalRenderer {
     underlines_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     monochrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    additive_polychrome_sprites_pipeline_state:
+        Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     unit_vertices: Retained<ProtocolObject<dyn MTLBuffer>>,
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
@@ -385,6 +387,14 @@ impl MetalRenderer {
             "polychrome_sprite_fragment",
             MTLPixelFormat::BGRA8Unorm,
         )?;
+        let additive_polychrome_sprites_pipeline_state = build_additive_pipeline_state(
+            &device,
+            &library,
+            "additive_polychrome_sprites",
+            "polychrome_sprite_vertex",
+            "polychrome_sprite_additive_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        )?;
         let surfaces_pipeline_state = build_pipeline_state(
             &device,
             &library,
@@ -430,6 +440,7 @@ impl MetalRenderer {
             underlines_pipeline_state,
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
+            additive_polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
             unit_vertices,
             instance_buffer_pool,
@@ -918,9 +929,12 @@ impl MetalRenderer {
                         &command_encoder,
                     ),
                 PrimitiveBatch::PolychromeSprites {
-                    texture_id, range, ..
+                    texture_id,
+                    blend,
+                    range,
                 } => self.draw_polychrome_sprites(
                     texture_id,
+                    blend,
                     range,
                     instance_bindings,
                     viewport_size,
@@ -1309,6 +1323,7 @@ impl MetalRenderer {
     fn draw_polychrome_sprites(
         &self,
         texture_id: AtlasTextureId,
+        blend: SpriteBlend,
         sprites: Range<usize>,
         instance_bindings: &InstanceBindings,
         viewport_size: Size<DevicePixels>,
@@ -1325,7 +1340,11 @@ impl MetalRenderer {
             DevicePixels(texture.width() as i32),
             DevicePixels(texture.height() as i32),
         );
-        command_encoder.setRenderPipelineState(&self.polychrome_sprites_pipeline_state);
+        let pipeline_state = match blend {
+            SpriteBlend::Normal => &self.polychrome_sprites_pipeline_state,
+            SpriteBlend::Additive => &self.additive_polychrome_sprites_pipeline_state,
+        };
+        command_encoder.setRenderPipelineState(pipeline_state);
         // SAFETY: The scene's sprite range, six unit vertices, and copied sizes match the shader layouts and slots.
         // Metal retains the buffers and texture, and writer.finish publishes the instance writes.
         unsafe {
@@ -1580,6 +1599,43 @@ fn build_pipeline_state(
     color_attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
     color_attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
     color_attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+
+    device
+        .newRenderPipelineStateWithDescriptor_error(&descriptor)
+        .with_context(|| format!("creating {label} render pipeline"))
+}
+
+/// Adds the source color to the destination and leaves destination alpha untouched, so a glow
+/// layer brightens what is beneath it without changing its coverage.
+fn build_additive_pipeline_state(
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    pixel_format: MTLPixelFormat,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>> {
+    let vertex_fn = library
+        .newFunctionWithName(&NSString::from_str(vertex_fn_name))
+        .with_context(|| format!("locating vertex function {vertex_fn_name}"))?;
+    let fragment_fn = library
+        .newFunctionWithName(&NSString::from_str(fragment_fn_name))
+        .with_context(|| format!("locating fragment function {fragment_fn_name}"))?;
+
+    let descriptor = MTLRenderPipelineDescriptor::new();
+    descriptor.setLabel(Some(&NSString::from_str(label)));
+    descriptor.setVertexFunction(Some(vertex_fn.as_ref()));
+    descriptor.setFragmentFunction(Some(fragment_fn.as_ref()));
+    // SAFETY: Index zero is within the pipeline's color attachment array.
+    let color_attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+    color_attachment.setPixelFormat(pixel_format);
+    color_attachment.setBlendingEnabled(true);
+    color_attachment.setRgbBlendOperation(MTLBlendOperation::Add);
+    color_attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
+    color_attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
+    color_attachment.setSourceAlphaBlendFactor(MTLBlendFactor::Zero);
+    color_attachment.setDestinationRGBBlendFactor(MTLBlendFactor::One);
+    color_attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::One);
 
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)

@@ -731,6 +731,28 @@ fragment float4 polychrome_sprite_fragment(
   return color;
 }
 
+// Paired with a One/One color blend: rgb is not weighted by the sample's
+// alpha, and alpha is zero so the destination's alpha is left as is.
+fragment float4 polychrome_sprite_additive_fragment(
+    PolychromeSpriteFragmentInput input [[stage_in]],
+    constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
+    texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
+  PolychromeSprite sprite = sprites[input.sprite_id];
+  constexpr sampler atlas_texture_sampler(mag_filter::linear,
+                                          min_filter::linear);
+  float4 sample =
+      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
+  float distance =
+      quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+  float opacity_factor = sprite.opacity * saturate(0.5 - distance);
+
+  float3 color = sample.rgb;
+  if (sprite.grayscale) {
+    color = float3(0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b);
+  }
+  return float4(color * opacity_factor, 0.);
+}
+
 struct PathRasterizationVertexOutput {
   float4 position [[position]];
   float2 st_position;
