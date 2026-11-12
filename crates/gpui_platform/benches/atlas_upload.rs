@@ -7,7 +7,7 @@ use gpui::{
     AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTile, BenchMeasurement, Bounds, ContentMask,
     Corners, DevicePixels, Hsla, ImageId, MonochromeSprite, PaddedBool32, PlatformAtlas,
     PlatformHeadlessRenderer, Point, PolychromeSprite, RenderImageParams, RenderSvgParams,
-    ScaledPixels, Scene, SharedString, Size, SpriteBlend, TransformationMatrix, size,
+    ScaledPixels, Scene, SharedString, Size, SpriteBlend, SpriteFilter, TransformationMatrix, size,
 };
 
 struct Entry {
@@ -239,6 +239,7 @@ fn tile_scene(tile: AtlasTile) -> Scene {
         AtlasTextureKind::Polychrome => scene.insert_primitive(PolychromeSprite {
             order: 0,
             blend: SpriteBlend::Normal,
+            filter: SpriteFilter::Linear,
             tile,
             grayscale: PaddedBool32::from(false),
             opacity: 1.0,

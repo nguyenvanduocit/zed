@@ -3,7 +3,7 @@ use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use gpui::{
     AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
-    PrimitiveBatch, ScaledPixels, Scene, Size, SpriteBlend, point, size,
+    PrimitiveBatch, ScaledPixels, Scene, Size, SpriteBlend, SpriteFilter, point, size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
@@ -23,8 +23,9 @@ use objc2_metal::{
     MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLDrawable,
     MTLGPUFamily, MTLLibrary, MTLLoadAction, MTLPixelFormat, MTLPrimitiveType,
     MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
-    MTLRenderPipelineState, MTLResourceOptions, MTLStorageMode, MTLStoreAction, MTLTexture,
-    MTLTextureDescriptor, MTLTextureType, MTLTextureUsage, MTLViewport,
+    MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
+    MTLSamplerState, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor,
+    MTLTextureType, MTLTextureUsage, MTLViewport,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use objc2_metal::{MTLBlitCommandEncoder, MTLOrigin, MTLRegion, MTLSize};
@@ -144,6 +145,8 @@ pub struct MetalRenderer {
     polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     additive_polychrome_sprites_pipeline_state:
         Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    linear_sampler_state: Retained<ProtocolObject<dyn MTLSamplerState>>,
+    nearest_sampler_state: Retained<ProtocolObject<dyn MTLSamplerState>>,
     surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     unit_vertices: Retained<ProtocolObject<dyn MTLBuffer>>,
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
@@ -395,6 +398,10 @@ impl MetalRenderer {
             "polychrome_sprite_additive_fragment",
             MTLPixelFormat::BGRA8Unorm,
         )?;
+        let linear_sampler_state =
+            build_sampler_state(&device, "linear_sampler", MTLSamplerMinMagFilter::Linear)?;
+        let nearest_sampler_state =
+            build_sampler_state(&device, "nearest_sampler", MTLSamplerMinMagFilter::Nearest)?;
         let surfaces_pipeline_state = build_pipeline_state(
             &device,
             &library,
@@ -441,6 +448,8 @@ impl MetalRenderer {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             additive_polychrome_sprites_pipeline_state,
+            linear_sampler_state,
+            nearest_sampler_state,
             surfaces_pipeline_state,
             unit_vertices,
             instance_buffer_pool,
@@ -931,10 +940,12 @@ impl MetalRenderer {
                 PrimitiveBatch::PolychromeSprites {
                     texture_id,
                     blend,
+                    filter,
                     range,
                 } => self.draw_polychrome_sprites(
                     texture_id,
                     blend,
+                    filter,
                     range,
                     instance_bindings,
                     viewport_size,
@@ -1324,6 +1335,7 @@ impl MetalRenderer {
         &self,
         texture_id: AtlasTextureId,
         blend: SpriteBlend,
+        filter: SpriteFilter,
         sprites: Range<usize>,
         instance_bindings: &InstanceBindings,
         viewport_size: Size<DevicePixels>,
@@ -1345,6 +1357,10 @@ impl MetalRenderer {
             SpriteBlend::Additive => &self.additive_polychrome_sprites_pipeline_state,
         };
         command_encoder.setRenderPipelineState(pipeline_state);
+        let sampler_state = match filter {
+            SpriteFilter::Linear => &self.linear_sampler_state,
+            SpriteFilter::Nearest => &self.nearest_sampler_state,
+        };
         // SAFETY: The scene's sprite range, six unit vertices, and copied sizes match the shader layouts and slots.
         // Metal retains the buffers and texture, and writer.finish publishes the instance writes.
         unsafe {
@@ -1375,6 +1391,10 @@ impl MetalRenderer {
             );
             command_encoder.setFragmentTexture_atIndex(
                 Some(&texture),
+                SpriteInputIndex::AtlasTexture as usize,
+            );
+            command_encoder.setFragmentSamplerState_atIndex(
+                Some(sampler_state),
                 SpriteInputIndex::AtlasTexture as usize,
             );
             command_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
@@ -1640,6 +1660,21 @@ fn build_additive_pipeline_state(
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
         .with_context(|| format!("creating {label} render pipeline"))
+}
+
+/// Samples with `filter` for both magnification and minification, clamped to the texture's edge.
+fn build_sampler_state(
+    device: &ProtocolObject<dyn MTLDevice>,
+    label: &str,
+    filter: MTLSamplerMinMagFilter,
+) -> Result<Retained<ProtocolObject<dyn MTLSamplerState>>> {
+    let descriptor = MTLSamplerDescriptor::new();
+    descriptor.setLabel(Some(&NSString::from_str(label)));
+    descriptor.setMinFilter(filter);
+    descriptor.setMagFilter(filter);
+    device
+        .newSamplerStateWithDescriptor(&descriptor)
+        .with_context(|| format!("creating {label} sampler state"))
 }
 
 fn build_path_sprite_pipeline_state(

@@ -67,6 +67,9 @@ mod apple_build {
         ]);
         config.no_includes = true;
         config.enumeration.prefix_with_name = true;
+        // Metal is C++: sized enums (`#[repr(u16)]`) must declare their underlying type there
+        // instead of being typedef'd to it.
+        config.cpp_compat = true;
 
         let mut builder = cbindgen::Builder::new();
 

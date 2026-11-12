@@ -430,6 +430,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                 let first_sprite = self.polychrome_sprites_iter.peek().unwrap();
                 let texture_id = first_sprite.tile.texture_id;
                 let blend = first_sprite.blend;
+                let filter = first_sprite.filter;
                 let sprites_start = self.polychrome_sprites_start;
                 let mut sprites_end = sprites_start + 1;
                 self.polychrome_sprites_iter.next();
@@ -439,6 +440,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                         (sprite.order, batch_kind) < max_order_and_kind
                             && sprite.tile.texture_id == texture_id
                             && sprite.blend == blend
+                            && sprite.filter == filter
                     })
                     .is_some()
                 {
@@ -448,6 +450,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                 Some(PrimitiveBatch::PolychromeSprites {
                     texture_id,
                     blend,
+                    filter,
                     range: sprites_start..sprites_end,
                 })
             }
@@ -495,6 +498,7 @@ pub enum PrimitiveBatch {
     PolychromeSprites {
         texture_id: AtlasTextureId,
         blend: SpriteBlend,
+        filter: SpriteFilter,
         range: Range<usize>,
     },
     Surfaces(Range<usize>),
@@ -525,13 +529,15 @@ impl PrimitiveBatch {
             Self::PolychromeSprites {
                 texture_id,
                 blend,
+                filter,
                 range,
             } => {
                 format!(
-                    "polychrome sprites ({}) on atlas {} with {:?} blend",
+                    "polychrome sprites ({}) on atlas {} with {:?} blend and {:?} filter",
                     range.len(),
                     texture_id.index,
-                    blend
+                    blend,
+                    filter
                 )
             }
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
@@ -755,7 +761,7 @@ impl From<SubpixelSprite> for Primitive {
 
 /// How a polychrome sprite's color combines with what is already drawn beneath it.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-#[repr(C)]
+#[repr(u16)]
 pub enum SpriteBlend {
     /// Source-over alpha compositing.
     #[default]
@@ -765,12 +771,26 @@ pub enum SpriteBlend {
     Additive,
 }
 
+/// How a polychrome sprite's texels are sampled when it is drawn larger or smaller than its image.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum SpriteFilter {
+    /// Bilinear filtering: smooth when scaled.
+    #[default]
+    Linear,
+    /// Nearest-neighbour sampling: each texel stays a solid block when scaled, for pixel art.
+    Nearest,
+}
+
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct PolychromeSprite {
     pub order: DrawOrder,
+    // `blend` and `filter` share one 32-bit word; the renderers pick a pipeline and sampler per
+    // batch from them, and the shaders never read them.
     pub blend: SpriteBlend,
+    pub filter: SpriteFilter,
     pub tile: AtlasTile,
     pub grayscale: PaddedBool32,
     pub opacity: f32,
@@ -975,7 +995,7 @@ mod tests {
     use super::*;
     use crate::{AtlasTextureKind, DevicePixels, TileId, size};
 
-    fn sprite(blend: SpriteBlend, x: f32) -> PolychromeSprite {
+    fn sprite(blend: SpriteBlend, filter: SpriteFilter, x: f32) -> PolychromeSprite {
         let bounds = Bounds {
             origin: point(ScaledPixels(x), ScaledPixels(0.)),
             size: size(ScaledPixels(10.), ScaledPixels(10.)),
@@ -983,6 +1003,7 @@ mod tests {
         PolychromeSprite {
             order: 0,
             blend,
+            filter,
             tile: AtlasTile {
                 texture_id: AtlasTextureId {
                     index: 0,
@@ -1003,7 +1024,9 @@ mod tests {
         }
     }
 
-    fn polychrome_batches(sprites: [PolychromeSprite; 2]) -> Vec<(SpriteBlend, Range<usize>)> {
+    fn polychrome_batches(
+        sprites: [PolychromeSprite; 2],
+    ) -> Vec<(SpriteBlend, SpriteFilter, Range<usize>)> {
         let mut scene = Scene::default();
         scene.push_layer(Bounds {
             origin: point(ScaledPixels(0.), ScaledPixels(0.)),
@@ -1017,7 +1040,12 @@ mod tests {
         scene
             .batches()
             .map(|batch| match batch {
-                PrimitiveBatch::PolychromeSprites { blend, range, .. } => (blend, range),
+                PrimitiveBatch::PolychromeSprites {
+                    blend,
+                    filter,
+                    range,
+                    ..
+                } => (blend, filter, range),
                 other => panic!("unexpected batch {}", other.label()),
             })
             .collect()
@@ -1026,21 +1054,48 @@ mod tests {
     #[test]
     fn polychrome_sprites_split_batches_on_blend() {
         let batches = polychrome_batches([
-            sprite(SpriteBlend::Normal, 0.),
-            sprite(SpriteBlend::Additive, 20.),
+            sprite(SpriteBlend::Normal, SpriteFilter::Linear, 0.),
+            sprite(SpriteBlend::Additive, SpriteFilter::Linear, 20.),
         ]);
         assert_eq!(
             batches,
-            vec![(SpriteBlend::Normal, 0..1), (SpriteBlend::Additive, 1..2)]
+            vec![
+                (SpriteBlend::Normal, SpriteFilter::Linear, 0..1),
+                (SpriteBlend::Additive, SpriteFilter::Linear, 1..2)
+            ]
         );
     }
 
     #[test]
     fn polychrome_sprites_with_same_blend_share_a_batch() {
         let batches = polychrome_batches([
-            sprite(SpriteBlend::Additive, 0.),
-            sprite(SpriteBlend::Additive, 20.),
+            sprite(SpriteBlend::Additive, SpriteFilter::Nearest, 0.),
+            sprite(SpriteBlend::Additive, SpriteFilter::Nearest, 20.),
         ]);
-        assert_eq!(batches, vec![(SpriteBlend::Additive, 0..2)]);
+        assert_eq!(
+            batches,
+            vec![(SpriteBlend::Additive, SpriteFilter::Nearest, 0..2)]
+        );
+    }
+
+    #[test]
+    fn polychrome_sprites_split_batches_on_filter() {
+        let batches = polychrome_batches([
+            sprite(SpriteBlend::Normal, SpriteFilter::Nearest, 0.),
+            sprite(SpriteBlend::Normal, SpriteFilter::Linear, 20.),
+        ]);
+        assert_eq!(
+            batches,
+            vec![
+                (SpriteBlend::Normal, SpriteFilter::Nearest, 0..1),
+                (SpriteBlend::Normal, SpriteFilter::Linear, 1..2)
+            ]
+        );
+    }
+
+    #[test]
+    fn blend_and_filter_share_the_word_before_tile() {
+        // The shaders' PolychromeSprite structs read a 32-bit word between `order` and `tile`.
+        assert_eq!(std::mem::offset_of!(PolychromeSprite, tile), 8);
     }
 }

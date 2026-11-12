@@ -1261,7 +1261,8 @@ fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
 
 struct PolychromeSprite {
     order: u32,
-    blend: u32,
+    // SpriteBlend and SpriteFilter, 16 bits each; the renderer picks the pipeline and sampler.
+    blend_and_filter: u32,
     tile: AtlasTile,
     grayscale: u32,
     opacity: f32,

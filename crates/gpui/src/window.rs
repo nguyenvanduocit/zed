@@ -19,12 +19,12 @@ use crate::{
     PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    SpriteBlend, StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
-    SystemWindowTabController, TabStopMap, Task, TextInputConfiguration, TextInputStateChange,
-    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
-    Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControls, WindowDecorations, WindowInsets, WindowOptions, WindowParams, WindowTextSystem,
-    WindowVisibility, point, prelude::*, px, rems, size, transparent_black,
+    SpriteBlend, SpriteFilter, StrikethroughStyle, Style, SubpixelSprite, Subscription,
+    SystemWindowTab, SystemWindowTabController, TabStopMap, Task, TextInputConfiguration,
+    TextInputStateChange, TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState,
+    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControls, WindowDecorations, WindowInsets, WindowOptions, WindowParams,
+    WindowTextSystem, WindowVisibility, point, prelude::*, px, rems, size, transparent_black,
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
@@ -5218,6 +5218,7 @@ impl Window {
             self.next_frame.scene.insert_primitive(PolychromeSprite {
                 order: 0,
                 blend: SpriteBlend::Normal,
+                filter: SpriteFilter::Linear,
                 grayscale: false.into(),
                 bounds,
                 corner_radii: Default::default(),
@@ -5319,11 +5320,12 @@ impl Window {
             frame_index,
             grayscale,
             SpriteBlend::Normal,
+            SpriteFilter::Linear,
         )
     }
 
     /// Paint an image like [`Window::paint_image`], combining it with what is beneath it
-    /// according to `blend`.
+    /// according to `blend` and sampling its pixels according to `filter`.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     pub fn paint_image_blended(
@@ -5335,6 +5337,7 @@ impl Window {
         frame_index: usize,
         grayscale: bool,
         blend: SpriteBlend,
+        filter: SpriteFilter,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
@@ -5415,6 +5418,7 @@ impl Window {
         self.next_frame.scene.insert_primitive(PolychromeSprite {
             order: 0,
             blend,
+            filter,
             grayscale: grayscale.into(),
             bounds: visible_bounds_snapped,
             content_mask,

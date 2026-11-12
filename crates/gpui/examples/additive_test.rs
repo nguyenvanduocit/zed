@@ -3,26 +3,40 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, Context, Corners, RenderImage, SpriteBlend, Window, WindowBounds, WindowOptions,
-    canvas, fill, point, prelude::*, px, rgb, size,
+    App, Bounds, Context, Corners, RenderImage, SpriteBlend, SpriteFilter, Window, WindowBounds,
+    WindowOptions, canvas, fill, point, prelude::*, px, rgb, size,
 };
 use gpui_platform::application;
 use image::{Frame, ImageBuffer, Rgba};
 
 const GLOW_SIZE: u32 = 64;
+/// Side of the checkerboard image, in texels.
+const CHECKER_TEXELS: u32 = 4;
+/// Logical pixels per checkerboard texel.
+const CHECKER_SCALE: f32 = 16.;
 
 /// Paints a solid `#004000` image additively, half over a red square and half over the grey
 /// background, so the blended pixels can be read back: `#ff4000` over red, `#408040` over grey.
+///
+/// Below it, a 4x4 black and white checkerboard drawn 16 times larger twice: with
+/// [`SpriteFilter::Nearest`] on the left, every texel a solid block with a one-pixel edge, and with
+/// the default [`SpriteFilter::Linear`] on the right, whose edges blend through greys.
 struct AdditiveTest {
     glow: Arc<RenderImage>,
+    checker: Arc<RenderImage>,
 }
 
 impl AdditiveTest {
     fn new() -> Self {
         // RenderImage expects BGRA; with zero red and blue the bytes match RGBA.
         let buffer = ImageBuffer::from_pixel(GLOW_SIZE, GLOW_SIZE, Rgba([0x00, 0x40, 0x00, 0xff]));
+        let checker = ImageBuffer::from_fn(CHECKER_TEXELS, CHECKER_TEXELS, |x, y| {
+            let shade = if (x + y) % 2 == 0 { 0xff } else { 0x00 };
+            Rgba([shade, shade, shade, 0xff])
+        });
         Self {
             glow: Arc::new(RenderImage::new([Frame::new(buffer)])),
+            checker: Arc::new(RenderImage::new([Frame::new(checker)])),
         }
     }
 }
@@ -30,6 +44,7 @@ impl AdditiveTest {
 impl Render for AdditiveTest {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let glow = self.glow.clone();
+        let checker = self.checker.clone();
         canvas(
             |_, _, _| {},
             move |bounds, _, window, _| {
@@ -50,8 +65,30 @@ impl Render for AdditiveTest {
                     0,
                     false,
                     SpriteBlend::Additive,
+                    SpriteFilter::Linear,
                 ) {
                     log::error!("failed to paint additive image: {error:#}");
+                }
+
+                let checker_side = px(CHECKER_TEXELS as f32 * CHECKER_SCALE);
+                for (x, filter) in [
+                    (px(40.), SpriteFilter::Nearest),
+                    (px(200.), SpriteFilter::Linear),
+                ] {
+                    let checker_bounds =
+                        Bounds::new(point(x, px(260.)), size(checker_side, checker_side));
+                    if let Err(error) = window.paint_image_blended(
+                        checker_bounds,
+                        checker_bounds,
+                        Corners::default(),
+                        checker.clone(),
+                        0,
+                        false,
+                        SpriteBlend::Normal,
+                        filter,
+                    ) {
+                        log::error!("failed to paint checkerboard: {error:#}");
+                    }
                 }
             },
         )

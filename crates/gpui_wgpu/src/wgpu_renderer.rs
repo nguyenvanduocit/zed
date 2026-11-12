@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
 use gpui::{
     AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, Path, Point, PrimitiveBatch,
-    ScaledPixels, Scene, Size, SpriteBlend, get_gamma_correction_ratios,
+    ScaledPixels, Scene, Size, SpriteBlend, SpriteFilter, get_gamma_correction_ratios,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
@@ -186,7 +186,8 @@ struct WgpuResources {
     pipelines: WgpuPipelines,
     bind_group_layouts: WgpuBindGroupLayouts,
     atlas_sampler: wgpu::Sampler,
-    atlas_texture_bind_groups: FxHashMap<AtlasTextureId, CachedTextureBindGroup>,
+    atlas_nearest_sampler: wgpu::Sampler,
+    atlas_texture_bind_groups: FxHashMap<(AtlasTextureId, SpriteFilter), CachedTextureBindGroup>,
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
     path_globals_bind_group: wgpu::BindGroup,
@@ -1298,6 +1299,12 @@ impl WgpuRendererCore {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let atlas_nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("atlas_nearest_sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
         let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
         let globals_size = std::mem::size_of::<GlobalParams>() as u64;
         let gamma_size = std::mem::size_of::<GammaParams>() as u64;
@@ -1401,6 +1408,7 @@ impl WgpuRendererCore {
                 pipelines,
                 bind_group_layouts,
                 atlas_sampler,
+                atlas_nearest_sampler,
                 atlas_texture_bind_groups: FxHashMap::default(),
                 globals_buffer,
                 globals_bind_group,
@@ -1638,6 +1646,7 @@ impl WgpuRendererCore {
                         self.draw_sprites(
                             &instance_bindings.monochrome_sprites,
                             texture_id,
+                            SpriteFilter::Linear,
                             &self.resources().pipelines.mono_sprites,
                             instance_range(range),
                             &mut pass,
@@ -1648,6 +1657,7 @@ impl WgpuRendererCore {
                         self.draw_sprites(
                             &instance_bindings.subpixel_sprites,
                             texture_id,
+                            SpriteFilter::Linear,
                             resources
                                 .pipelines
                                 .subpixel_sprites
@@ -1660,6 +1670,7 @@ impl WgpuRendererCore {
                     PrimitiveBatch::PolychromeSprites {
                         texture_id,
                         blend,
+                        filter,
                         range,
                     } => {
                         let pipelines = &self.resources().pipelines;
@@ -1670,6 +1681,7 @@ impl WgpuRendererCore {
                         self.draw_sprites(
                             &instance_bindings.polychrome_sprites,
                             texture_id,
+                            filter,
                             pipeline,
                             instance_range(range),
                             &mut pass,
@@ -1732,6 +1744,7 @@ impl WgpuRendererCore {
         &self,
         label: &str,
         texture_view: &wgpu::TextureView,
+        filter: SpriteFilter,
     ) -> wgpu::BindGroup {
         let resources = self.resources();
         resources
@@ -1746,50 +1759,58 @@ impl WgpuRendererCore {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&resources.atlas_sampler),
+                        resource: wgpu::BindingResource::Sampler(match filter {
+                            SpriteFilter::Linear => &resources.atlas_sampler,
+                            SpriteFilter::Nearest => &resources.atlas_nearest_sampler,
+                        }),
                     },
                 ],
             })
     }
 
     fn prepare_texture_bind_groups(&mut self, scene: &Scene) {
-        let mut texture_ids = SmallVec::<[AtlasTextureId; 8]>::new();
+        let mut keys = SmallVec::<[(AtlasTextureId, SpriteFilter); 8]>::new();
         for batch in scene.batches() {
-            let texture_id = match batch {
+            let key = match batch {
                 PrimitiveBatch::MonochromeSprites { texture_id, .. }
-                | PrimitiveBatch::SubpixelSprites { texture_id, .. }
-                | PrimitiveBatch::PolychromeSprites { texture_id, .. } => texture_id,
+                | PrimitiveBatch::SubpixelSprites { texture_id, .. } => {
+                    (texture_id, SpriteFilter::Linear)
+                }
+                PrimitiveBatch::PolychromeSprites {
+                    texture_id, filter, ..
+                } => (texture_id, filter),
                 _ => continue,
             };
-            if !texture_ids.contains(&texture_id) {
-                texture_ids.push(texture_id);
+            if !keys.contains(&key) {
+                keys.push(key);
             }
         }
 
         self.resources_mut()
             .atlas_texture_bind_groups
-            .retain(|texture_id, _| texture_ids.contains(texture_id));
+            .retain(|key, _| keys.contains(key));
 
-        for texture_id in texture_ids {
+        for key @ (texture_id, filter) in keys {
             let Some(texture_info) = self.atlas.get_texture_info(texture_id) else {
-                self.resources_mut()
-                    .atlas_texture_bind_groups
-                    .remove(&texture_id);
+                self.resources_mut().atlas_texture_bind_groups.remove(&key);
                 continue;
             };
             let is_current = self
                 .resources()
                 .atlas_texture_bind_groups
-                .get(&texture_id)
+                .get(&key)
                 .is_some_and(|cached| cached.texture_generation == texture_info.generation);
             if is_current {
                 continue;
             }
 
-            let bind_group =
-                self.create_texture_bind_group("atlas_texture_bind_group", &texture_info.view);
+            let bind_group = self.create_texture_bind_group(
+                "atlas_texture_bind_group",
+                &texture_info.view,
+                filter,
+            );
             self.resources_mut().atlas_texture_bind_groups.insert(
-                texture_id,
+                key,
                 CachedTextureBindGroup {
                     texture_generation: texture_info.generation,
                     bind_group,
@@ -1821,6 +1842,7 @@ impl WgpuRendererCore {
         &self,
         sprite_instances: &InstanceBinding,
         texture_id: AtlasTextureId,
+        filter: SpriteFilter,
         pipeline: &wgpu::RenderPipeline,
         range: Range<u32>,
         pass: &mut wgpu::RenderPass<'_>,
@@ -1831,7 +1853,10 @@ impl WgpuRendererCore {
         let resources = self.resources();
         // The atlas has released this texture; the batch belongs to a stale
         // paint that will be replaced once its view re-renders.
-        let Some(texture) = resources.atlas_texture_bind_groups.get(&texture_id) else {
+        let Some(texture) = resources
+            .atlas_texture_bind_groups
+            .get(&(texture_id, filter))
+        else {
             return Ok(());
         };
         pass.set_pipeline(pipeline);
@@ -1886,6 +1911,7 @@ impl WgpuRendererCore {
         let texture = self.create_texture_bind_group(
             "path_intermediate_texture_bind_group",
             &path_intermediate_view,
+            SpriteFilter::Linear,
         );
         let resources = self.resources();
         pass.set_pipeline(&resources.pipelines.paths);
